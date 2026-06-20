@@ -1,0 +1,105 @@
+name: CD - Update Helm Values
+
+on:
+  workflow_call:
+    inputs:
+      helm-service-name:
+        required: true
+        type: string
+        description: "Helm values key (e.g. user-service) — must match the top-level key in values-{env}.yaml"
+      chart-path:
+        required: true
+        type: string
+        description: "Path to Helm chart inside manifest repo (e.g. helm/nutriai)"
+      image-tag:
+        required: true
+        type: string
+        description: "Docker image tag to bump"
+    secrets:
+      APP_ID:
+        required: true
+        description: "GitHub App ID for cross-repo manifest push"
+      APP_PRIVATE_KEY:
+        required: true
+        description: "GitHub App private key (PEM)"
+      MANIFEST_REPO:
+        required: true
+        description: "Manifest repo name only (e.g. NutriAI-manifests)"
+
+jobs:
+  update-helm:
+    name: "CD - Update Helm Values"
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Determine which values file to update ──────────────────────────
+      - name: Resolve target values file
+        id: resolve
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "values_file=values-prod.yaml" >> $GITHUB_OUTPUT
+            echo "env=prod"                     >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
+            echo "values_file=values-dev.yaml"  >> $GITHUB_OUTPUT
+            echo "env=dev"                      >> $GITHUB_OUTPUT
+          fi
+
+      # ── Generate GitHub App Token for cross-repo push ────────────────
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ secrets.MANIFEST_REPO }}
+
+      # ── Checkout the manifest repo ───────────────────────────────────
+      - name: Checkout manifest repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/${{ secrets.MANIFEST_REPO }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: manifest-repo
+
+      # ── Verify the target file exists ────────────────────────────────
+      - name: Verify values file exists
+        run: |
+          VALUES_FILE="manifest-repo/${{ inputs.chart-path }}/${{ steps.resolve.outputs.values_file }}"
+          if [[ ! -f "${VALUES_FILE}" ]]; then
+            echo "::error::Values file not found: ${VALUES_FILE}"
+            ls -la "manifest-repo/${{ inputs.chart-path }}/" 2>/dev/null || echo "Directory does not exist"
+            exit 1
+          fi
+          echo "Found: ${VALUES_FILE}"
+
+      # ── Update the image tag ─────────────────────────────────────────
+      - name: Update image tag in ${{ steps.resolve.outputs.values_file }}
+        run: |
+          TAG="${{ inputs.image-tag }}"
+          SERVICE="${{ inputs.helm-service-name }}"
+          VALUES_FILE="manifest-repo/${{ inputs.chart-path }}/${{ steps.resolve.outputs.values_file }}"
+
+          echo "Updating ${SERVICE}.image.tag to ${TAG} in ${VALUES_FILE}"
+          yq e ".\"${SERVICE}\".image.tag = \"${TAG}\"" -i "${VALUES_FILE}"
+
+          echo "-- Updated values --"
+          yq e ".\"${SERVICE}\".image" "${VALUES_FILE}"
+
+      # ── Commit & push ────────────────────────────────────────────────
+      - name: Commit and push to manifest repo
+        run: |
+          TAG="${{ inputs.image-tag }}"
+          SERVICE="${{ inputs.helm-service-name }}"
+          ENV="${{ steps.resolve.outputs.env }}"
+          VALUES_FILE="${{ inputs.chart-path }}/${{ steps.resolve.outputs.values_file }}"
+
+          cd manifest-repo
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add "${VALUES_FILE}"
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+
+          git commit -m "chore(${SERVICE}): bump ${ENV} image tag to ${TAG} [skip ci]"
+          git push
