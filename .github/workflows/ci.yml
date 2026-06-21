@@ -181,6 +181,7 @@ jobs:
             -Dsonar.python.coverage.reportPaths=coverage.xml
             -Dsonar.sources=.
             -Dsonar.tests=tests
+            -Dsonar.exclusions=tests/**
             -Dsonar.language=python
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
