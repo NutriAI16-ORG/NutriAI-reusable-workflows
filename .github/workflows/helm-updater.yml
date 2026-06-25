@@ -30,6 +30,7 @@ jobs:
   update-helm:
     name: "CD - Update Helm Values"
     runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/main' && 'production' || '' }}
 
     steps:
       # ── Determine which values file to update ──────────────────────────
